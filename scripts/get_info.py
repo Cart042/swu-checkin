@@ -1,81 +1,195 @@
 import json
 import requests
 import urllib.parse
+import base64
+import re
 from des import des
 from verify import verify
 
-def get_token(username: str, password: str, timeout=10):
-    def transform(ticket):
-        ST = urllib.parse.unquote(ticket)
-        ticket = urllib.parse.unquote(ticket).split("-")
-        str1 = ""
-        str2 = ""
-        for i in ticket[1]:
-            str1 += str((int(i) + 5) % 10)
-        for i in ticket[2]:
-            if "0" <= i <= "9":
-                str2 += str((int(i) + 5) % 10)
-            elif 'A' <= i <= 'Z':
-                if ord(i) + 10 > ord('Z'):
-                    str2 += chr(ord(i) + 10 - 26)
-                else:
-                    str2 += chr(ord(i) + 10)
-            else:
-                if ord(i) + 15 > ord('z'):
-                    str2 += chr(ord(i) + 15 - 26)
-                else:
-                    str2 += chr(ord(i) + 15)
-        return str1, str2
+def extract_login_params(response):
+    parsed_url = urllib.parse.urlparse(response.url)
+    query_params = urllib.parse.parse_qs(parsed_url.query)
+    goto = query_params.get("goto", [""])[0]
+    realm = query_params.get("realm", ["/"])[0]
+    service = query_params.get("service", ["initService"])[0]
+    
+    state = None
+    
+    # 1. Try to find state in response.url
+    url_unquoted = urllib.parse.unquote(urllib.parse.unquote(response.url))
+    state_match = re.search(r'state=([a-f0-9]{32})', url_unquoted)
+    if state_match:
+        state = state_match.group(1)
+        
+    # 2. Try to find state inside decoded goto parameter
+    if not state and goto:
+        try:
+            padding_needed = len(goto) % 4
+            goto_padded = goto + "=" * (4 - padding_needed) if padding_needed else goto
+            decoded_goto = base64.b64decode(goto_padded).decode('utf-8', errors='ignore')
+            decoded_unquoted = urllib.parse.unquote(urllib.parse.unquote(decoded_goto))
+            state_match = re.search(r'state=([a-f0-9]{32})', decoded_unquoted)
+            if state_match:
+                state = state_match.group(1)
+        except Exception:
+            pass
+            
+    # 3. Fallback: search history
+    if not state:
+        for hist in response.history:
+            hist_unquoted = urllib.parse.unquote(urllib.parse.unquote(hist.url))
+            state_match = re.search(r'state=([a-f0-9]{32})', hist_unquoted)
+            if state_match:
+                state = state_match.group(1)
+                break
+                
+    # 4. If still not found, search inside history's decoded goto
+    if not state:
+        for hist in response.history:
+            try:
+                parsed_hist = urllib.parse.urlparse(hist.url)
+                hist_params = urllib.parse.parse_qs(parsed_hist.query)
+                hist_goto = hist_params.get("goto", [""])[0]
+                if hist_goto:
+                    padding_needed = len(hist_goto) % 4
+                    goto_padded = hist_goto + "=" * (4 - padding_needed) if padding_needed else hist_goto
+                    decoded_goto = base64.b64decode(goto_padded).decode('utf-8', errors='ignore')
+                    decoded_unquoted = urllib.parse.unquote(urllib.parse.unquote(decoded_goto))
+                    state_match = re.search(r'state=([a-f0-9]{32})', decoded_unquoted)
+                    if state_match:
+                        state = state_match.group(1)
+                        break
+            except Exception:
+                pass
+                
+    return goto, realm, service, state
 
-    session = requests.Session()
-    username, password = des(username, password)
-    data = {
-        "IDToken1": username,
-        "IDToken2": password,
-        "IDToken3": "",
-        "goto": "aHR0cDovL2lkbS5zd3UuZWR1LmNuL2FtL29hdXRoMi9hdXRob3JpemU/c2VydmljZT1pbml0U2VydmljZSZyZXNwb25zZV90eXBlPWNvZGUmY2xpZW50X2lkPTdjMXpva29samw5YmJpaG82eXVvJnNjb3BlPXVpZCtjbit1c2VySWRDb2RlJnJlZGlyZWN0X3VyaT1odHRwcyUzQSUyRiUyRnVhYWFwLnN3dS5lZHUuY24lMkZjYXMlMkZsb2dpbiUzRnNlcnZpY2UlM0RodHRwcyUyNTNBJTI1MkYlMjUyRnVhYWFwLnN3dS5lZHUuY24lMjUyRmNhcyUyNTJGb2F1dGgyLjAlMjUyRmNhbGxiYWNrQXV0aG9yaXplJTI2b3JpZ2luYWxSZXF1ZXN0VXJsJTNEaHR0cHMlMjUzQSUyNTJGJTI1MkZ1YWFhcC5zd3UuZWR1LmNuJTI1MkZjYXMlMjUyRm9hdXRoMi4wJTI1MkZhdXRob3JpemUlMjUzRnJlc3BvbnNlX3R5cGUlMjUzRGNvZGUlMjUyNmNsaWVudF9pZCUyNTNEY2FzNiUyNTI2cmVkaXJlY3RfdXJpJTI1M0RodHRwcyUyNTI1M0ElMjUyNTJGJTI1MjUyRm9mLnN3dS5lZHUuY24lMjUyNTNBNDQzJTI1MjUyRmNhcyUyNTI1MkZvYXV0aCUyNTI1MkZjYWxsYmFjayUyNTI1MkZTV1VfQ0FTMl9GRURFUkFMJTI1MjZzdGF0ZSUyNTNEZTFlMTczODhlNzU4MjY3YjFiNzI2ZjM4Mjg0NDM5MWElMjUyNnNjb3BlJTI1M0RzaW1wbGUlMjZmZWRlcmFsRW5hYmxlJTNEdHJ1ZSZkZWNpc2lvbj1BbGxvdw==",
-        "gotoOnFail": "",
-        "sunQueryParamsString": "cmVhbG09LyZzZXJ2aWNlPWluaXRTZXJ2aWNlJg==",
-        "encoded": "true",
-        "gx_charset": "UTF-8"
-    }
-    response = session.get(
-        "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter",
-        timeout=timeout)
-    state = urllib.parse.unquote(urllib.parse.unquote(response.url)).split("state=")[1][0:32]
-    try:
-        # 处理登录后的重定向，获取票据
-        response = session.post("https://idm.swu.edu.cn/am/UI/Login", data=data, allow_redirects=True, timeout=timeout)
+def get_token(username: str, password: str, timeout=15):
+    from playwright.sync_api import sync_playwright
+    import ddddocr
 
-        # 安全获取ticket参数
-        if "ticket=" not in response.url:
-            raise Exception("登录失败：无法获取票据参数")
-        ticket = response.url.split("ticket=")[1]
+    cas_url = (
+        "https://of.swu.edu.cn/cas/oauth/login/SWU_CAS2_FEDERAL"
+        "?service=https%3A%2F%2Fof.swu.edu.cn%2Fgateway%2Ffighter-middle"
+        "%2Fapi%2Fintegrate%2Fuaap%2Fcas%2Fresolve-cas-return"
+        "%3Fnext%3Dhttps%253A%252F%252Fof.swu.edu.cn"
+        "%252F%2523%252FcasLogin%253Ffrom%253D%25252FappCenter"
+    )
 
-        str1, str2 = transform(ticket)
-        CD = f"CD-{str1}-{str2}-wiie://777.643.675.751:3537/rph"
-        url = urllib.parse.unquote(
-            f"https://of.swu.edu.cn/cas/oauth/callback/SWU_CAS2_FEDERAL?code={CD}@@hxbeat&state={state}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 800},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
-        response = session.get(url, allow_redirects=True)
+        try:
+            page.goto(cas_url, wait_until="networkidle", timeout=timeout * 1000)
 
-        # 安全获取ST参数
-        if "ticket=" not in response.url:
-            raise Exception("登录失败：无法获取ST参数")
-        ST = response.url.split("ticket=")[1]
+            # Click "统一认证登录"
+            page.locator('img[src*="unified_button"]').click()
 
-        # 安全获取token
-        token_response = requests.get(
-            f"https://of.swu.edu.cn/gateway/fighter-middle/api/integrate/uaap/cas/exchange-token?token={ST}&remember=true",
-            timeout=timeout).json()
-        if "data" not in token_response:
-            raise Exception("登录失败：无法获取访问令牌")
+            # Wait for loginName
+            page.wait_for_selector('input#loginName', timeout=timeout * 1000)
 
-        token = token_response["data"]
-        return token
-    except Exception as e:
-        # 捕获所有可能的异常并提供明确的错误信息
-        raise Exception(f"获取令牌失败：{str(e)}")
+            success = False
+            # Try up to 3 times to solve captcha and submit
+            for attempt in range(3):
+                # Fill credentials
+                page.locator('input#loginName').fill(username)
+                page.locator('input#password').fill(password)
+
+                # Capture captcha image bytes
+                captcha_el = page.locator('img#kaptchaImage')
+                img_bytes = captcha_el.screenshot()
+
+                # Solve captcha
+                ocr = ddddocr.DdddOcr(show_ad=False)
+                code = ocr.classification(img_bytes)
+
+                page.locator('input[type="text"]#validateCode').fill(code)
+
+                # Click login
+                page.locator('input#button').click()
+
+                # Wait to check result
+                redirected = False
+                for _ in range(5):
+                    page.wait_for_timeout(1000)
+                    if "of.swu.edu.cn" in page.url:
+                        redirected = True
+                        break
+
+                if redirected:
+                    success = True
+                    break
+
+                # Check for visible error message
+                error_msg = ""
+                try:
+                    error_msg = page.evaluate("() => { const el = document.querySelector('.error, #error, .errorMessage, #errorMessage, .messager-body'); return el ? el.innerText : ''; }")
+                except Exception:
+                    pass
+
+                if error_msg:
+                    error_msg = error_msg.strip()
+                    if any(k in error_msg for k in ["密码", "账户", "用户名", "密码错误", "不正确"]):
+                        if "验证码" not in error_msg:
+                            raise Exception(f"登录失败: {error_msg}")
+
+                # If not redirected and no explicit credential error, refresh captcha and try again
+                try:
+                    captcha_el.click()
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+            if not success:
+                raise Exception("登录失败: 无法跳转到 of.swu.edu.cn (验证码多次识别失败或服务不可用)")
+
+            # Extract token from localStorage
+            page.wait_for_timeout(2000)
+            local_storage = page.evaluate("() => JSON.stringify(localStorage)")
+            ls_dict = json.loads(local_storage)
+
+            token = None
+            for k, v in ls_dict.items():
+                if k == 'access_token':
+                    token = v
+                    break
+                if 'token' in k.lower() or 'auth' in k.lower():
+                    token = v
+                if 'vuex' in k.lower():
+                    try:
+                        vx = json.loads(v)
+                        def search_dict(dct):
+                            for vk, vv in dct.items():
+                                if isinstance(vv, dict):
+                                    t = search_dict(vv)
+                                    if t: return t
+                                elif isinstance(vv, str) and ('token' in vk.lower() or 'auth' in vk.lower()):
+                                    if len(vv) > 5:
+                                        return vv
+                            return None
+                        t = search_dict(vx)
+                        if t:
+                            token = t
+                    except Exception:
+                        pass
+
+            if not token:
+                raise Exception("无法从 localStorage 中提取登录 Token")
+
+            return token
+
+        except Exception as e:
+            raise Exception(f"获取令牌失败：{str(e)}")
+        finally:
+            browser.close()
 
 def get_student_id(token, timeout=10):
     url = "https://of.swu.edu.cn/gateway/fighter-middle/api/auth/user?appType=fighter-portal"
