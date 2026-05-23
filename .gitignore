@@ -179,3 +179,21 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# SWU Checkin script files
+users.json
+cookies.json
+token.txt
+captcha.png
+captcha.txt
+captcha_pw.png
+requests_captcha.png
+slider_modal.html
+debug_*.png
+debug_*.html
+debug_*.txt
+tac.css
+tac.min.js
+load.js
+login_js.txt
+project_archive.zip

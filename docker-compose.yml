@@ -1,0 +1,8 @@
+version: '3.8'
+
+services:
+  swu-checkin:
+    build: .
+    image: swu-checkin:latest
+    env_file:
+      - .env
